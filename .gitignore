@@ -1,0 +1,48 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Environment variables (NEVER push these!)
+.env
+.env.local
+.env.production
+
+# Data and database (regenerated at runtime)
+data/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# Chroma vector DB
+chroma_db/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
