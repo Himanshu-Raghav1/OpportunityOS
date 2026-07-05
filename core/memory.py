@@ -226,6 +226,43 @@ def load_agent_decisions(scan_id: str) -> List[dict]:
     return [dict(r) for r in rows]
 
 
+def get_recent_completed_scan(hours: float = 8.0) -> Optional[dict]:
+    """Retrieve the most recent completed scan if it finished within the specified hours."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM scans WHERE status = 'completed' ORDER BY completed_at DESC LIMIT 1"
+        ).fetchone()
+        if row and row["completed_at"]:
+            comp_time = datetime.fromisoformat(row["completed_at"])
+            diff = datetime.utcnow() - comp_time
+            if diff.total_seconds() < (hours * 3600):
+                return dict(row)
+    except Exception as e:
+        print(f"Error loading recent completed scan: {e}")
+    finally:
+        conn.close()
+    return None
+
+
+def load_opportunities_by_scan(scan_id: str) -> List[dict]:
+    """Load all opportunities belonging to a specific scan."""
+    conn = get_db()
+    try:
+        rows = conn.execute("""
+            SELECT * FROM opportunities
+            WHERE scan_id = ?
+            ORDER BY score DESC
+        """, (scan_id,)).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"Error loading opportunities by scan: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+
 def get_all_opportunity_titles() -> List[str]:
     """Used by deduplication agent for fast title lookup."""
     conn = get_db()

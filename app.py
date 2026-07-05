@@ -203,56 +203,8 @@ st.markdown("""
 
 # ── Run Agent Pipeline ────────────────────────────────────────────────────────
 if scan_clicked:
-    scan_id = str(uuid.uuid4())
-    st.session_state.last_scan_id = scan_id
-    st.session_state.agent_messages = []
-
-    scan_meta = ScanMetadata(scan_id=scan_id)
-
-    # ── Handle Profile Synthesis (Personalize Match) ─────────────────────────
-    profile = None
-    if st.session_state.personalize_match:
-        with st.status("🧠 Synthesizing Personal Profile...", expanded=True) as status:
-            st.write("🔗 Fetching GitHub profile and repositories...")
-            st.write("📄 Extracting text from PDF resume...")
-            st.write("🤖 Running Gemini profiler...")
-            
-            from core.profile_extractor import synthesize_profile
-            profile = synthesize_profile(
-                github_user=st.session_state.user_github,
-                linkedin_text=st.session_state.user_linkedin,
-                resume_bytes=st.session_state.get("user_resume_bytes")
-            )
-            st.session_state.user_profile = profile
-            status.update(label="✅ User Profile Synthesized!", state="complete")
-            
-        st.info(f"**Extracted Skills:** {', '.join(profile.get('skills', []))}")
-        st.info(f"**Experience Level:** {profile.get('experience_level', 'Unknown')}")
-
-    # Build initial state
-    initial_state = {
-        "scan_id": scan_id,
-        "user_preferences": {
-            "resume": st.session_state.get("user_resume", ""),
-            "profile": st.session_state.get("user_profile") if st.session_state.personalize_match else None
-        },
-        "search_plan": None,
-        "raw_opportunities": [],
-        "extracted_opportunities": [],
-        "deduplicated_opportunities": [],
-        "duplicates_removed": 0,
-        "classified_opportunities": [],
-        "enriched_opportunities": [],
-        "ranked_opportunities": [],
-        "agent_logs": [],
-        "hunter_context": {},
-        "scan_metadata": scan_meta,
-        "progress_messages": [],
-        "errors": []
-    }
-
-    # ── Agent execution with live progress UI ─────────────────────────────
-    progress_container = st.empty()
+    from core.memory import get_recent_completed_scan, load_opportunities_by_scan, load_agent_decisions
+    import json
 
     AGENT_STEPS = [
         ("🧠", "Search Planning Agent",          "Creating optimal search strategy...", "Planning"),
@@ -267,6 +219,8 @@ if scan_clicked:
         ("🏆", "Ranking Agent",                  "Scoring & ranking all opportunities...", "Rank"),
         ("🎯", "Evaluator Agent",                "Matching opportunities to your resume...", "Match"),
     ]
+
+    progress_container = st.empty()
 
     def render_live_progress(current: int, messages: list):
         """Render animated progress in the container."""
@@ -292,65 +246,245 @@ if scan_clicked:
                                    unsafe_allow_html=True)
 
             st.markdown("---")
-            # Live log — plain text in a code block, no HTML f-string issues
             if messages:
                 log_text = "\n".join(messages[-15:])
                 st.code(log_text, language=None)
 
-    try:
-        from agents.graph import get_graph
+    # Check for a recent completed scan within the last 8 hours
+    recent_scan = get_recent_completed_scan(8.0)
 
-        render_live_progress(0, ["🚀 Initializing OpportunityOS AI..."])
-        time.sleep(0.3)
-
-        # ── Run pipeline step by step using stream ────────────────────────
-        graph = get_graph()
-        current_step = 0
-        all_messages = ["🚀 OpportunityOS AI Agent Pipeline started"]
-        final_state = None
-
-        for event in graph.stream(initial_state):
-            # event = {node_name: state_updates}
-            for node_name, updates in event.items():
-                step_messages = updates.get("progress_messages", [])
-                all_messages.extend(step_messages)
-                st.session_state.agent_messages.extend(step_messages)
-                current_step += 1
-                render_live_progress(current_step, all_messages)
-                time.sleep(0.1)
-                final_state = updates
-
-        # ── Pipeline complete ─────────────────────────────────────────────
-        render_live_progress(len(AGENT_STEPS), all_messages + ["✅ All agents completed successfully!"])
+    if recent_scan:
+        st.info("ℹ️ Cached scan found from the last 8 hours. Replaying simulated pipeline to preserve API quota...")
+        
+        cached_scan_id = recent_scan["scan_id"]
+        st.session_state.last_scan_id = cached_scan_id
+        st.session_state.agent_messages = []
+        
+        # Load cached opportunities and logs
+        cached_opps = load_opportunities_by_scan(cached_scan_id)
+        cached_logs = load_agent_decisions(cached_scan_id)
+        
+        # Group logs by agent name for replay
+        logs_by_agent = {}
+        for l in cached_logs:
+            agent = l.get("agent_name")
+            if agent not in logs_by_agent:
+                logs_by_agent[agent] = []
+            logs_by_agent[agent].append(l)
+            
+        all_messages = ["🚀 Replaying cached agent pipeline (completed within the last 8 hours)..."]
+        
+        # Step through agent simulation
+        for idx, (emoji, agent_title, default_desc, short_label) in enumerate(AGENT_STEPS):
+            all_messages.append(f"{emoji} [{agent_title}] {default_desc}")
+            render_live_progress(idx, all_messages)
+            time.sleep(0.4)
+            
+            # Map labels to DB agent names
+            map_name = {
+                "Search Planning Agent": "Search Planning Agent",
+                "Hunter: Firecrawl Crawl": "Opportunity Hunter Agent",
+                "Hunter: Web Search": "Opportunity Hunter Agent",
+                "Hunter: Live APIs": "Opportunity Hunter Agent",
+                "Hunter: Finalize": "Opportunity Hunter Agent",
+                "Information Extraction Agent": "Information Extraction Agent",
+                "Deduplication Agent": "Deduplication Agent",
+                "Classification Agent": "Classification Agent",
+                "Opportunity Intelligence Agent": "Opportunity Intelligence Agent",
+                "Ranking Agent": "Ranking Agent",
+                "Evaluator Agent": "Evaluator Agent"
+            }.get(agent_title, agent_title)
+            
+            agent_decisions = logs_by_agent.get(map_name, [])
+            for dec in agent_decisions:
+                all_messages.append(f"   ↳ Decision: {dec.get('decision')}")
+                if dec.get('reasoning'):
+                    reason = dec.get('reasoning', '')[:120] + "..." if len(dec.get('reasoning', '')) > 120 else dec.get('reasoning', '')
+                    all_messages.append(f"     Reasoning: {reason}")
+            
+            render_live_progress(idx + 1, all_messages)
+            time.sleep(0.4)
+            
+        # Re-run personalized matching locally if profile is provided
+        profile = None
+        if st.session_state.personalize_match or st.session_state.get("user_resume", "").strip():
+            all_messages.append("🧠 Recalculating Match Scores for your profile credentials...")
+            render_live_progress(len(AGENT_STEPS), all_messages)
+            
+            # Run profile synthesis
+            if st.session_state.personalize_match:
+                from core.profile_extractor import synthesize_profile
+                profile = synthesize_profile(
+                    github_user=st.session_state.user_github,
+                    linkedin_text=st.session_state.user_linkedin,
+                    resume_bytes=st.session_state.get("user_resume_bytes")
+                )
+                st.session_state.user_profile = profile
+            
+            # Convert cached dicts to Opportunity objects
+            from agents.agent_08_evaluator import run_evaluator
+            from core.models import Opportunity
+            
+            opp_objs = []
+            for o in cached_opps:
+                skills = o.get("required_skills", "[]")
+                if isinstance(skills, str):
+                    try:
+                        skills = json.loads(skills)
+                    except Exception:
+                        skills = []
+                o_dict = dict(o)
+                o_dict["required_skills"] = skills
+                
+                if o_dict.get("deadline_date") and isinstance(o_dict["deadline_date"], str):
+                    try:
+                        o_dict["deadline_date"] = datetime.fromisoformat(o_dict["deadline_date"])
+                    except Exception:
+                        o_dict["deadline_date"] = None
+                if o_dict.get("created_at") and isinstance(o_dict["created_at"], str):
+                    try:
+                        o_dict["created_at"] = datetime.fromisoformat(o_dict["created_at"])
+                    except Exception:
+                        o_dict["created_at"] = datetime.utcnow()
+                        
+                opp_objs.append(Opportunity(**o_dict))
+                
+            mock_state = {
+                "scan_id": cached_scan_id,
+                "user_preferences": {
+                    "resume": st.session_state.get("user_resume", ""),
+                    "profile": profile
+                },
+                "ranked_opportunities": opp_objs
+            }
+            
+            eval_result = run_evaluator(mock_state)
+            
+            # Convert back to dicts
+            final_opps = []
+            for o in eval_result.get("ranked_opportunities", opp_objs):
+                final_opps.append(o.model_dump() if hasattr(o, "model_dump") else (o.dict() if hasattr(o, "dict") else o))
+                
+            cached_opps = final_opps
+            
+        render_live_progress(len(AGENT_STEPS), all_messages + ["✅ Cached replay and evaluation complete!"])
         time.sleep(0.5)
         progress_container.empty()
-
-        # Load results from the final state or memory
-        ranked = []
-        if final_state and final_state.get("ranked_opportunities"):
-            ranked = [o.model_dump() if hasattr(o, "model_dump") else (o.dict() if hasattr(o, "dict") else o) for o in final_state["ranked_opportunities"]]
-        else:
-            ranked = load_all_opportunities()
-
-        st.session_state.opportunities = ranked
+        
+        st.session_state.opportunities = cached_opps
         st.session_state.scan_complete = True
         st.session_state.scan_stats = {
-            "total": initial_state.get("scan_metadata", scan_meta).total_found if hasattr(scan_meta, "total_found") else len(ranked),
-            "unique": len(ranked),
-            "duplicates": initial_state.get("duplicates_removed", 0),
-            "sources": len(set(o.get("source", "") for o in ranked))
+            "total": len(cached_opps),
+            "unique": len(cached_opps),
+            "duplicates": recent_scan.get("total_duplicates_removed", 0),
+            "sources": len(set(o.get("source", "") for o in cached_opps))
+        }
+        st.balloons()
+        st.success(f"✅ Simulation complete! Loaded **{len(cached_opps)} opportunities** from cache (scanned {recent_scan.get('completed_at')[:16]}).")
+        
+    else:
+        # No recent scan, run live agent pipeline
+        scan_id = str(uuid.uuid4())
+        st.session_state.last_scan_id = scan_id
+        st.session_state.agent_messages = []
+
+        scan_meta = ScanMetadata(scan_id=scan_id)
+
+        # ── Handle Profile Synthesis (Personalize Match) ─────────────────────────
+        profile = None
+        if st.session_state.personalize_match:
+            with st.status("🧠 Synthesizing Personal Profile...", expanded=True) as status:
+                st.write("🔗 Fetching GitHub profile and repositories...")
+                st.write("📄 Extracting text from PDF resume...")
+                st.write("🤖 Running Gemini profiler...")
+                
+                from core.profile_extractor import synthesize_profile
+                profile = synthesize_profile(
+                    github_user=st.session_state.user_github,
+                    linkedin_text=st.session_state.user_linkedin,
+                    resume_bytes=st.session_state.get("user_resume_bytes")
+                )
+                st.session_state.user_profile = profile
+                status.update(label="✅ User Profile Synthesized!", state="complete")
+                
+            st.info(f"**Extracted Skills:** {', '.join(profile.get('skills', []))}")
+            st.info(f"**Experience Level:** {profile.get('experience_level', 'Unknown')}")
+
+        # Build initial state
+        initial_state = {
+            "scan_id": scan_id,
+            "user_preferences": {
+                "resume": st.session_state.get("user_resume", ""),
+                "profile": st.session_state.get("user_profile") if st.session_state.personalize_match else None
+            },
+            "search_plan": None,
+            "raw_opportunities": [],
+            "extracted_opportunities": [],
+            "deduplicated_opportunities": [],
+            "duplicates_removed": 0,
+            "classified_opportunities": [],
+            "enriched_opportunities": [],
+            "ranked_opportunities": [],
+            "agent_logs": [],
+            "hunter_context": {},
+            "scan_metadata": scan_meta,
+            "progress_messages": [],
+            "errors": []
         }
 
-        st.balloons()
-        st.success(f"✅ Scan complete! Discovered **{len(ranked)} unique opportunities** across multiple platforms.")
+        try:
+            from agents.graph import get_graph
 
-    except Exception as e:
-        progress_container.empty()
-        st.error(f"⚠️ Agent pipeline error: {str(e)}")
-        st.info("💡 Make sure your GOOGLE_API_KEY is set in the .env file")
-        import traceback
-        with st.expander("Error Details"):
-            st.code(traceback.format_exc())
+            render_live_progress(0, ["🚀 Initializing OpportunityOS AI..."])
+            time.sleep(0.3)
+
+            # ── Run pipeline step by step using stream ────────────────────────
+            graph = get_graph()
+            current_step = 0
+            all_messages = ["🚀 OpportunityOS AI Agent Pipeline started"]
+            final_state = None
+
+            for event in graph.stream(initial_state):
+                for node_name, updates in event.items():
+                    step_messages = updates.get("progress_messages", [])
+                    all_messages.extend(step_messages)
+                    st.session_state.agent_messages.extend(step_messages)
+                    current_step += 1
+                    render_live_progress(current_step, all_messages)
+                    time.sleep(0.1)
+                    final_state = updates
+
+            # ── Pipeline complete ─────────────────────────────────────────────
+            render_live_progress(len(AGENT_STEPS), all_messages + ["✅ All agents completed successfully!"])
+            time.sleep(0.5)
+            progress_container.empty()
+
+            # Load results from the final state or memory
+            ranked = []
+            if final_state and final_state.get("ranked_opportunities"):
+                ranked = [o.model_dump() if hasattr(o, "model_dump") else (o.dict() if hasattr(o, "dict") else o) for o in final_state["ranked_opportunities"]]
+            else:
+                ranked = load_all_opportunities()
+
+            st.session_state.opportunities = ranked
+            st.session_state.scan_complete = True
+            st.session_state.scan_stats = {
+                "total": initial_state.get("scan_metadata", scan_meta).total_found if hasattr(scan_meta, "total_found") else len(ranked),
+                "unique": len(ranked),
+                "duplicates": initial_state.get("duplicates_removed", 0),
+                "sources": len(set(o.get("source", "") for o in ranked))
+            }
+
+            st.balloons()
+            st.success(f"✅ Scan complete! Discovered **{len(ranked)} unique opportunities** across multiple platforms.")
+
+        except Exception as e:
+            progress_container.empty()
+            st.error(f"⚠️ Agent pipeline error: {str(e)}")
+            st.info("💡 Make sure your GOOGLE_API_KEY is set in the .env file")
+            import traceback
+            with st.expander("Error Details"):
+                st.code(traceback.format_exc())
 
 
 # ── Stats Banner ──────────────────────────────────────────────────────────────
