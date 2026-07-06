@@ -114,8 +114,16 @@ Rules:
 def fetch_firecrawl_page(url: str, source: str, fc_app) -> Optional[tuple[str, str, str]]:
     """Crawl a single URL with Firecrawl and extract opportunities using Gemini."""
     try:
-        # Changed timeout to 20000 milliseconds (20 seconds) since Firecrawl SDK expects milliseconds
-        result = fc_app.scrape_url(url, formats=["markdown"], timeout=20000)
+        # Optimized scrape call with parameters to avoid bot blocks and wait for dynamic loading
+        result = fc_app.scrape_url(
+            url, 
+            formats=["markdown"], 
+            params={
+                "blockAds": False,
+                "waitFor": 2000
+            },
+            timeout=20000
+        )
         content = ""
         if isinstance(result, dict):
             content = result.get("markdown", result.get("content", ""))
@@ -741,13 +749,29 @@ def _plan_queries(state: AgentState) -> List[str]:
 
 
 def run_hunter_firecrawl(state: AgentState) -> dict:
-    """Layer 1: Firecrawl page scraping."""
-    llm = get_llm(temperature=0.4)
+    """Layer 1: Firecrawl page scraping (optional)."""
     messages = [
         "🔍 **Opportunity Hunter Agent — TURBO EDITION**",
         "   Activating 3-layer intelligence pipeline...",
         "\n   🔥 **LAYER 1: Firecrawl Web Crawl**",
     ]
+    
+    user_prefs = state.get("user_preferences", {})
+    enable_fc = user_prefs.get("enable_firecrawl", False)
+    
+    if not enable_fc:
+        messages.append("   ℹ️  Skipped Firecrawl web crawl (Platform Scouts & APIs will handle discovery)")
+        ctx = dict(state.get("hunter_context") or {})
+        ctx["fc_count"] = 0
+        return {
+            "raw_opportunities": list(state.get("raw_opportunities", [])),
+            "hunter_context": ctx,
+            "progress_messages": messages,
+            "scan_metadata": state.get("scan_metadata"),
+        }
+
+    # Otherwise run Firecrawl:
+    llm = get_llm(temperature=0.4)
     print("[HUNTER] Starting Layer 1: Firecrawl web crawl...", flush=True)
 
     fc_opps, fc_sources, fc_msgs = run_firecrawl_layer(llm)

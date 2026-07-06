@@ -105,6 +105,13 @@ with st.sidebar:
 
     st.markdown("---")
 
+    # Advanced / deep crawl options
+    enable_firecrawl = st.checkbox(
+        "Enable Deep Web Crawl (Firecrawl)",
+        value=False,
+        help="Runs deep headless browser scraping on 8 platform pages (GSoC, Outreachy, etc.). Uses Firecrawl credits and takes ~20s."
+    )
+
     # Scan button
     scan_clicked = st.button(
         "⚡ Scan Opportunities",
@@ -415,7 +422,8 @@ if scan_clicked:
             "scan_id": scan_id,
             "user_preferences": {
                 "resume": st.session_state.get("user_resume", ""),
-                "profile": st.session_state.get("user_profile") if st.session_state.personalize_match else None
+                "profile": st.session_state.get("user_profile") if st.session_state.personalize_match else None,
+                "enable_firecrawl": enable_firecrawl
             },
             "search_plan": None,
             "raw_opportunities": [],
