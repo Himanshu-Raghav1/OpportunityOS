@@ -42,7 +42,7 @@ from agents.platform_scouts.deep_link_resolver import resolve_deep_links
 # UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _get(url: str, params: dict = None, headers: dict = None, timeout: int = 15) -> Optional[requests.Response]:
+def _get(url: str, params: dict = None, headers: dict = None, timeout: int = 5) -> Optional[requests.Response]:
     try:
         resp = requests.get(url, params=params, headers=headers, timeout=timeout)
         if resp.status_code == 200:
@@ -52,7 +52,7 @@ def _get(url: str, params: dict = None, headers: dict = None, timeout: int = 15)
     return None
 
 
-def _post(url: str, json_body: dict = None, timeout: int = 15) -> Optional[requests.Response]:
+def _post(url: str, json_body: dict = None, timeout: int = 5) -> Optional[requests.Response]:
     try:
         resp = requests.post(url, json=json_body, timeout=timeout)
         if resp.status_code == 200:
@@ -114,8 +114,8 @@ Rules:
 def fetch_firecrawl_page(url: str, source: str, fc_app) -> Optional[tuple[str, str, str]]:
     """Crawl a single URL with Firecrawl and extract opportunities using Gemini."""
     try:
-        # Changed timeout from 20000 (5.5 hours!) to 20 seconds to prevent infinite hangs
-        result = fc_app.scrape_url(url, formats=["markdown"], timeout=20)
+        # Changed timeout to 20000 milliseconds (20 seconds) since Firecrawl SDK expects milliseconds
+        result = fc_app.scrape_url(url, formats=["markdown"], timeout=20000)
         content = ""
         if isinstance(result, dict):
             content = result.get("markdown", result.get("content", ""))

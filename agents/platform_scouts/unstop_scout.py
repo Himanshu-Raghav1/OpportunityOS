@@ -50,7 +50,7 @@ def fetch_unstop() -> List[Dict]:
     
     for url in targets:
         try:
-            res = fc_app.scrape_url(url, formats=["markdown"], timeout=20)
+            res = fc_app.scrape_url(url, formats=["markdown"], timeout=20000)
             content = ""
             if isinstance(res, dict):
                 content = res.get("markdown", res.get("content", ""))

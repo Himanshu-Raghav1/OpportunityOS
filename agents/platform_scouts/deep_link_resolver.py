@@ -41,9 +41,7 @@ def resolve_deep_links(opportunities: List[Dict], fc_app=None, llm=None) -> List
             continue
             
         try:
-            # We use Firecrawl to scrape the page and ask for structured data (the apply link)
-            # Or we can just get the HTML/markdown and use the LLM to find the application link
-            result = fc_app.scrape_url(url, formats=["markdown", "links"], timeout=15)
+            result = fc_app.scrape_url(url, formats=["markdown", "links"], timeout=15000)
             links = []
             if isinstance(result, dict):
                 links = result.get("links", [])
