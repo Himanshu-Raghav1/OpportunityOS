@@ -155,6 +155,13 @@ def run_deduplicator(state: AgentState) -> dict:
         scan_meta.total_unique = len(unique)
         scan_meta.total_duplicates_removed = duplicate_count
 
+    # 💾 Intermediate DB checkpoint saving:
+    from core.memory import save_opportunities_bulk
+    try:
+        save_opportunities_bulk(unique)
+    except Exception as e:
+        print(f"[Deduplicator DB Checkpoint] Save failed: {e}", flush=True)
+
     return {
         "deduplicated_opportunities": unique,
         "duplicates_removed": duplicate_count,

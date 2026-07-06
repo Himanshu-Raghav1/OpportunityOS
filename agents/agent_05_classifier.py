@@ -204,6 +204,13 @@ def run_classifier(state: AgentState) -> dict:
         reasoning=f"Rule-based: {len(classified) - len(needs_llm)} | LLM fallback: {len(needs_llm)} (in batches of 15). Distribution: {cat_summary}"
     )
 
+    # 💾 Intermediate DB checkpoint saving:
+    from core.memory import save_opportunities_bulk
+    try:
+        save_opportunities_bulk(classified)
+    except Exception as e:
+        print(f"[Classifier DB Checkpoint] Save failed: {e}", flush=True)
+
     return {
         "classified_opportunities": classified,
         "agent_logs": [decision],
