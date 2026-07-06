@@ -11,16 +11,16 @@ Scores each opportunity on a 0-100 scale using weighted factors:
   - Deadline Urgency                : 5%
   - Community Impact                : 5%
 
-Uses rule-based scoring + LLM reasoning for transparency.
+Uses rule-based scoring + LLM batch reasoning for efficiency and transparency.
 """
 from __future__ import annotations
 import re
+import time
 from datetime import datetime
 from typing import List, Dict, Any
 from core.state import AgentState
 from core.models import Opportunity, AgentDecision
 from core.llm import get_precise_llm, parse_json_safely, rate_limited_invoke
-
 
 # Org reputation presets (manually curated, normalized 0-10)
 REPUTATION_MAP: Dict[str, float] = {
@@ -48,7 +48,6 @@ def score_reputation(opp: Opportunity) -> float:
     for key, score in REPUTATION_MAP.items():
         if key in org_lower:
             return score
-    # Unknown org — moderate score
     return 5.0
 
 
@@ -85,15 +84,14 @@ def score_deadline_urgency(opp: Opportunity) -> float:
     if not opp.deadline or opp.deadline.lower() in ("tba", "rolling", "ongoing"):
         return 5.0
     try:
-        # Try to parse date
         for fmt in ["%Y-%m-%d", "%d %B %Y", "%B %Y", "%Y"]:
             try:
                 deadline_dt = datetime.strptime(opp.deadline[:10], fmt)
                 days_left = (deadline_dt - datetime.utcnow()).days
                 if days_left < 0:
-                    return 1.0   # Expired
+                    return 1.0
                 elif days_left <= 7:
-                    return 10.0  # Closing very soon
+                    return 10.0
                 elif days_left <= 30:
                     return 8.0
                 elif days_left <= 90:
@@ -107,49 +105,17 @@ def score_deadline_urgency(opp: Opportunity) -> float:
     return 5.0
 
 
-RANKING_PROMPT = """You are an expert at evaluating tech and student opportunities.
-
-Score this opportunity on a scale of 0-100 and explain your reasoning.
-
-Opportunity:
-- Title: {title}
-- Organization: {organization}
-- Category: {category}
-- Description: {description}
-- Rewards: {rewards}
-- Eligibility: {eligibility}
-- Career Impact Score: {career_impact}/10
-- Learning Impact Score: {learning_impact}/10
-- Location: {location}
-
-Consider:
-1. Organization prestige and reputation
-2. Career value and networking potential
-3. Learning and skill development
-4. Accessibility to students
-5. Prize/stipend value
-6. Technical relevance and industry alignment
-
-Return ONLY JSON:
-{{
-  "score": 75,
-  "reasoning": "Brief explanation of why this score was assigned — 2-3 specific points"
-}}
-"""
-
-
 def compute_rule_based_score(opp: Opportunity) -> float:
     """Compute weighted composite score using rule-based factors."""
     reputation = score_reputation(opp)
-    learning = opp.learning_impact  # Already 1-10
-    career = opp.career_impact      # Already 1-10
+    learning = opp.learning_impact
+    career = opp.career_impact
     accessibility = score_accessibility(opp)
     prize = score_prize(opp)
-    technical = min(10.0, len(opp.required_skills) * 1.5 + 3)  # More specific = higher relevance
+    technical = min(10.0, len(opp.required_skills) * 1.5 + 3)
     urgency = score_deadline_urgency(opp)
-    community = 6.0  # Default — hard to auto-score
+    community = 6.0
 
-    # Weighted sum (weights sum to 1.0)
     weighted = (
         reputation   * 0.20 +
         learning     * 0.15 +
@@ -160,9 +126,80 @@ def compute_rule_based_score(opp: Opportunity) -> float:
         urgency      * 0.05 +
         community    * 0.05
     )
-
-    # Normalize to 0-100
     return round(weighted * 10, 1)
+
+
+BATCH_RANKING_PROMPT = """You are an expert at evaluating tech and student opportunities.
+
+Score these opportunities on a scale of 0-100 and explain your reasoning.
+
+Opportunities:
+{opp_list}
+
+Return ONLY valid JSON mapping each opportunity ID to its score and reasoning:
+{{
+  "opp_id_1": {{
+    "score": 75,
+    "reasoning": "Brief explanation of why this score was assigned — 2-3 specific points"
+  }}
+}}
+"""
+
+
+def llm_rank_batch(opps: List[Opportunity], llm) -> Dict[str, dict]:
+    """Rank opportunities in batches of 15 to save API calls and prevent network timeouts."""
+    results = {}
+    batch_size = 15
+    
+    for i in range(0, len(opps), batch_size):
+        batch = opps[i:i + batch_size]
+        
+        # Pre-populate fallbacks
+        for opp in batch:
+            results[opp.id] = {
+                "score": compute_rule_based_score(opp),
+                "reasoning": f"Rule-based: Reputation {score_reputation(opp)*10:.0f}/100, Career {opp.career_impact*10:.0f}/100"
+            }
+            
+        opp_list_str = []
+        for opp in batch:
+            opp_list_str.append(
+                f"ID: {opp.id}\n"
+                f"Title: {opp.title}\n"
+                f"Org: {opp.organization}\n"
+                f"Category: {opp.category}\n"
+                f"Desc: {opp.description[:180]}\n"
+                f"Rewards: {opp.rewards[:150]}\n"
+                f"Eligibility: {opp.eligibility[:150]}\n"
+                f"Career Impact Score: {opp.career_impact}/10\n"
+                f"Learning Impact Score: {opp.learning_impact}/10\n"
+                f"Location: {opp.location}\n"
+                f"---"
+            )
+            
+        prompt = BATCH_RANKING_PROMPT.format(
+            opp_list="\n".join(opp_list_str)
+        )
+        
+        try:
+            raw = rate_limited_invoke(llm, [("human", prompt)])
+            data = parse_json_safely(raw)
+            if isinstance(data, dict):
+                for opp in batch:
+                    opp_res = data.get(opp.id, {})
+                    if isinstance(opp_res, dict):
+                        results[opp.id] = {
+                            "score": float(opp_res.get("score", results[opp.id]["score"])),
+                            "reasoning": str(opp_res.get("reasoning", results[opp.id]["reasoning"]))[:300]
+                        }
+            else:
+                print(f"[Ranker] Batch {i // batch_size + 1}: LLM returned non-object response", flush=True)
+        except Exception as e:
+            print(f"[Ranker] Batch {i // batch_size + 1} failed: {e}", flush=True)
+            
+        time.sleep(0.5)
+        
+    return results
 
 
 def run_ranker(state: AgentState) -> dict:
@@ -181,56 +218,40 @@ def run_ranker(state: AgentState) -> dict:
         }
 
     llm = get_precise_llm()
+    
+    # Run batch ranking
+    rank_results = llm_rank_batch(opps, llm)
+    
     ranked: List[Opportunity] = []
-
     for opp in opps:
-        # Step 1: Rule-based score
-        rule_score = compute_rule_based_score(opp)
-
-        # Step 2: Component scores for transparency
+        # Load rule-based details for transparency metrics
         opp.reputation_score = score_reputation(opp) * 10
         opp.learning_score = opp.learning_impact * 10
         opp.career_score = opp.career_impact * 10
         opp.accessibility_score = score_accessibility(opp) * 10
 
-        # Step 3: LLM refinement (for top candidates or when rule score is uncertain)
-        try:
-            prompt = RANKING_PROMPT.format(
-                title=opp.title,
-                organization=opp.organization,
-                category=opp.category,
-                description=opp.description[:200],
-                rewards=opp.rewards,
-                eligibility=opp.eligibility[:150],
-                career_impact=opp.career_impact,
-                learning_impact=opp.learning_impact,
-                location=opp.location
-            )
-            raw = rate_limited_invoke(llm, [("human", prompt)])
-            data = parse_json_safely(raw)
-
-            llm_score = float(data.get("score", rule_score))
-            llm_reasoning = str(data.get("reasoning", ""))
-
+        res = rank_results.get(opp.id)
+        if res:
             # Blend rule-based (60%) + LLM (40%)
-            final_score = round(rule_score * 0.6 + llm_score * 0.4, 1)
-            final_score = min(100.0, max(0.0, final_score))
-
-            opp.score = final_score
-            opp.ranking_reasoning = llm_reasoning
-
-        except Exception:
-            opp.score = rule_score
-            opp.ranking_reasoning = f"Rule-based: Reputation {opp.reputation_score:.0f}/100, Career {opp.career_score:.0f}/100, Learning {opp.learning_score:.0f}/100"
+            rule_score = compute_rule_based_score(opp)
+            final_score = round(rule_score * 0.6 + res["score"] * 0.4, 1)
+            opp.score = min(100.0, max(0.0, final_score))
+            opp.ranking_reasoning = res["reasoning"]
+        else:
+            opp.score = compute_rule_based_score(opp)
+            opp.ranking_reasoning = f"Rule-based fallback: Reputation {opp.reputation_score:.0f}/100"
 
         ranked.append(opp)
 
     # Sort by score descending
     ranked.sort(key=lambda o: o.score, reverse=True)
 
-    # Save to memory
+    # 💾 Intermediate DB checkpoint saving:
     from core.memory import save_opportunities_bulk
-    save_opportunities_bulk(ranked)
+    try:
+        save_opportunities_bulk(ranked)
+    except Exception as e:
+        print(f"[Ranker DB Checkpoint] Save failed: {e}", flush=True)
 
     # Update scan metadata
     scan_meta = state.get("scan_metadata")
@@ -239,14 +260,17 @@ def run_ranker(state: AgentState) -> dict:
         scan_meta.completed_at = datetime.utcnow()
         scan_meta.status = "completed"
         from core.memory import save_scan
-        save_scan(scan_meta)
+        try:
+            save_scan(scan_meta)
+        except Exception:
+            pass
 
     top3 = [f"{o.title} ({o.score:.0f})" for o in ranked[:3]]
     decision = AgentDecision(
         scan_id=scan_id,
         agent_name="Ranking Agent",
         decision=f"Ranked {len(ranked)} opportunities. Top 3: {', '.join(top3)}",
-        reasoning="Used weighted formula (reputation 20%, career 20%, learning 15%, accessibility 15%, prize 10%, technical 10%, urgency 5%, community 5%) blended with LLM evaluation (40%)"
+        reasoning="Used weighted rule formula blended with batch LLM evaluation (40%)"
     )
 
     return {
