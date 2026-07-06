@@ -174,6 +174,10 @@ def run_firecrawl_layer(llm) -> tuple[List[Dict], List[str], List[str]]:
     except ImportError:
         return [], [], ["   ⚠️  Firecrawl: firecrawl-py not installed (pip install firecrawl-py)"]
 
+    # 🛡️ Global socket timeout configuration to prevent low-level TCP/socket locks
+    import socket
+    socket.setdefaulttimeout(20.0)
+
     all_opps: List[Dict] = []
     sources_used: List[str] = []
     messages = [f"   🔥 Firecrawl: Crawling {len(FIRECRAWL_TARGETS)} opportunity pages in parallel..."]
@@ -184,19 +188,23 @@ def run_firecrawl_layer(llm) -> tuple[List[Dict], List[str], List[str]]:
         url, source = target
         return fetch_firecrawl_page(url, source, fc_app)
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(_fetch_worker, t): t for t in FIRECRAWL_TARGETS}
-        for fut in futures:
-            target = futures[fut]
-            url, source = target
-            try:
-                res = fut.result(timeout=30)
-                if res:
-                    scraped_results.append(res)
-                else:
-                    messages.append(f"   ⚠️  Firecrawl/{source}: crawl returned empty content or failed")
-            except Exception as e:
-                messages.append(f"   ⚠️  Firecrawl/{source}: crawl timed out or failed: {str(e)[:60]}")
+    executor = ThreadPoolExecutor(max_workers=5)
+    futures = {executor.submit(_fetch_worker, t): t for t in FIRECRAWL_TARGETS}
+    
+    for fut in futures:
+        target = futures[fut]
+        url, source = target
+        try:
+            res = fut.result(timeout=25)  # Enforce future resolution timeout
+            if res:
+                scraped_results.append(res)
+            else:
+                messages.append(f"   ⚠️  Firecrawl/{source}: crawl returned empty content or failed")
+        except Exception as e:
+            messages.append(f"   ⚠️  Firecrawl/{source}: crawl timed out or failed: {str(e)[:60]}")
+            
+    # Non-blocking executor shutdown prevents the main thread from blocking at exit
+    executor.shutdown(wait=False)
 
     # Process extraction sequentially to keep API requests under 15 RPM
     for result in scraped_results:
