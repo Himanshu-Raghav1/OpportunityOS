@@ -148,6 +148,6 @@ Modularity is validated through `tests/test_mock_pipeline.py`. The pipeline can 
 
 * **Project Title:** OpportunityOS AI
 * **Submission Track:** Productivity & Assistants / Developer Tooling
-* **Interactive Demo Link:** [http://localhost:8501](http://localhost:8501) (Streamlit App)
+* **Interactive Demo Link:** [OpportunityOS](https://opportunityos.streamlit.app/) (Streamlit App)
 * **GitHub Repository:** [github.com/Himanshu-Raghav1/OpportunityOS](https://github.com/Himanshu-Raghav1/OpportunityOS)
 * **Video Submission:** [Link to 5-Minute YouTube Walkthrough]

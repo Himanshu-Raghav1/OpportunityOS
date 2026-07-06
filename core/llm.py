@@ -73,10 +73,66 @@ def is_domain_reachable(domain: str) -> bool:
 
 def rate_limited_invoke(llm, messages: list, max_retries: int = 5) -> str:
     """
-    Invoke LLM with exponential backoff on 429 rate limit errors.
-    Waits up to ~2 min total across retries before giving up.
-    Returns empty string on final failure.
+    Invoke LLM with Groq API routing fallback if GROQ_API_KEY is present,
+    otherwise falls back to Google Gemini with exponential backoff.
     """
+    import os
+    import time
+    import requests
+
+    groq_key = os.getenv("GROQ_API_KEY")
+    if groq_key and groq_key.strip():
+        # Convert LangChain messages structure to Groq/OpenAI format
+        groq_messages = []
+        for msg in messages:
+            if isinstance(msg, tuple):
+                role, content = msg
+                role_name = "user" if role in ["human", "user"] else "system" if role in ["system"] else "assistant"
+                groq_messages.append({"role": role_name, "content": content})
+            elif hasattr(msg, "content"):
+                role_name = "user" if "Human" in type(msg).__name__ else "system" if "System" in type(msg).__name__ else "assistant"
+                groq_messages.append({"role": role_name, "content": msg.content})
+            else:
+                groq_messages.append({"role": "user", "content": str(msg)})
+                
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": groq_messages,
+            "temperature": 0.1,
+        }
+        
+        # Enable structured JSON parsing if requested in the prompts
+        all_text = " ".join(m["content"] for m in groq_messages).lower()
+        if "json" in all_text:
+            payload["response_format"] = {"type": "json_object"}
+            
+        headers = {
+            "Authorization": f"Bearer {groq_key.strip()}",
+            "Content-Type": "application/json"
+        }
+        
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=20
+                )
+                if resp.status_code == 200:
+                    return resp.json()["choices"][0]["message"]["content"]
+                elif resp.status_code == 429:
+                    print(f"[Groq] Rate limited (429). Retrying in 2 seconds...")
+                    time.sleep(2)
+                else:
+                    print(f"[Groq] API Error {resp.status_code}: {resp.text[:200]}")
+                    break
+            except Exception as e:
+                print(f"[Groq] Request exception: {e}")
+                time.sleep(1)
+        print("[Groq] Failsafe: falling back to Gemini API.")
+
+    # Google Gemini Fallback:
     # Quick network check to avoid 2+ minute OS connection retry loops
     if not is_domain_reachable("generativelanguage.googleapis.com"):
         print("[LLM] Network offline: generativelanguage.googleapis.com is unreachable. Skipping.")
