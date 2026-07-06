@@ -67,9 +67,8 @@ def _post(url: str, json_body: dict = None, timeout: int = 15) -> Optional[reque
 # ══════════════════════════════════════════════════════════════════════════════
 
 # URLs Firecrawl will scrape — these are public listing pages
+# We exclude devfolio and unstop since we have dedicated scouts for them in Layer 3
 FIRECRAWL_TARGETS = [
-    ("https://devfolio.co/hackathons",               "devfolio"),
-    ("https://unstop.com/hackathons",                "unstop"),
     ("https://devpost.com/hackathons",               "devpost"),
     ("https://mlh.io/seasons/2025/events",           "mlh"),
     ("https://www.kaggle.com/competitions",          "kaggle"),
@@ -77,8 +76,6 @@ FIRECRAWL_TARGETS = [
     ("https://www.outreachy.org",                    "outreachy"),
     ("https://mentorship.lfx.linuxfoundation.org",   "lfx_mentorship"),
     ("https://wellfound.com/jobs?jobType=internship", "wellfound"),
-    ("https://unstop.com/fellowships",               "fellowships"),
-    ("https://unstop.com/internships",               "internships_unstop"),
     ("https://hackerearth.com/challenges/hackathon/","hackerearth"),
 ]
 
@@ -114,10 +111,11 @@ Rules:
 """
 
 
-def fetch_firecrawl_page(url: str, source: str, fc_app) -> List[Dict]:
+def fetch_firecrawl_page(url: str, source: str, fc_app) -> Optional[tuple[str, str, str]]:
     """Crawl a single URL with Firecrawl and extract opportunities using Gemini."""
     try:
-        result = fc_app.scrape_url(url, formats=["markdown"], timeout=20000)
+        # Changed timeout from 20000 (5.5 hours!) to 20 seconds to prevent infinite hangs
+        result = fc_app.scrape_url(url, formats=["markdown"], timeout=20)
         content = ""
         if isinstance(result, dict):
             content = result.get("markdown", result.get("content", ""))
@@ -157,7 +155,7 @@ def extract_from_firecrawl_content(content: str, source: str, url: str, llm) -> 
 
 
 def run_firecrawl_layer(llm) -> tuple[List[Dict], List[str], List[str]]:
-    """Run Firecrawl on all target URLs, extract opportunities via Gemini."""
+    """Run Firecrawl on all target URLs in parallel, extract opportunities via Gemini."""
     fc_key = os.getenv("FIRECRAWL_API_KEY", "").strip()
     if not fc_key:
         return [], [], ["   ℹ️  Firecrawl: No API key set (add FIRECRAWL_API_KEY to .env)"]
@@ -170,22 +168,39 @@ def run_firecrawl_layer(llm) -> tuple[List[Dict], List[str], List[str]]:
 
     all_opps: List[Dict] = []
     sources_used: List[str] = []
-    messages = [f"   🔥 Firecrawl: Crawling {len(FIRECRAWL_TARGETS)} opportunity pages..."]
+    messages = [f"   🔥 Firecrawl: Crawling {len(FIRECRAWL_TARGETS)} opportunity pages in parallel..."]
 
-    for url, source in FIRECRAWL_TARGETS:
-        result = fetch_firecrawl_page(url, source, fc_app)
-        if result is None:
-            messages.append(f"   ⚠️  Firecrawl/{source}: crawl failed or login wall")
-            continue
+    # Crawl target pages in parallel (network-bound) to speed up execution
+    scraped_results = []
+    def _fetch_worker(target):
+        url, source = target
+        return fetch_firecrawl_page(url, source, fc_app)
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_worker, t): t for t in FIRECRAWL_TARGETS}
+        for fut in futures:
+            target = futures[fut]
+            url, source = target
+            try:
+                res = fut.result(timeout=30)
+                if res:
+                    scraped_results.append(res)
+                else:
+                    messages.append(f"   ⚠️  Firecrawl/{source}: crawl returned empty content or failed")
+            except Exception as e:
+                messages.append(f"   ⚠️  Firecrawl/{source}: crawl timed out or failed: {str(e)[:60]}")
+
+    # Process extraction sequentially to keep API requests under 15 RPM
+    for result in scraped_results:
         content, src, page_url = result
         opps = extract_from_firecrawl_content(content, src, page_url, llm)
         if opps:
             all_opps.extend(opps)
-            sources_used.append(source)
-            messages.append(f"   ✅ Firecrawl/{source}: {len(opps)} opportunities extracted")
+            sources_used.append(src)
+            messages.append(f"   ✅ Firecrawl/{src}: {len(opps)} opportunities extracted")
         else:
-            messages.append(f"   ⚠️  Firecrawl/{source}: no opportunities found (login wall?)")
-        time.sleep(0.5)
+            messages.append(f"   ⚠️  Firecrawl/{src}: no opportunities found in content")
+        time.sleep(1.0) # Respect Gemini API limits
 
     messages.append(f"   📦 Firecrawl total: {len(all_opps)} opportunities from {len(sources_used)} pages")
     return all_opps, sources_used, messages
