@@ -395,7 +395,13 @@ if scan_clicked:
         st.session_state.last_scan_id = scan_id
         st.session_state.agent_messages = []
 
-        scan_meta = ScanMetadata(scan_id=scan_id)
+        # 🛡️ Initialize and instantly save scan metadata
+        scan_meta = ScanMetadata(scan_id=scan_id, status="running")
+        from core.memory import save_scan
+        try:
+            save_scan(scan_meta)
+        except Exception as e:
+            print(f"Error saving initial scan: {e}", flush=True)
 
         # ── Handle Profile Synthesis (Personalize Match) ─────────────────────────
         profile = None
@@ -457,6 +463,17 @@ if scan_clicked:
                     step_messages = updates.get("progress_messages", [])
                     all_messages.extend(step_messages)
                     st.session_state.agent_messages.extend(step_messages)
+                    
+                    # 💾 Save agent log decisions to DB immediately during stream execution
+                    agent_logs = updates.get("agent_logs", [])
+                    if agent_logs:
+                        from core.memory import save_agent_decision
+                        for log in agent_logs:
+                            try:
+                                save_agent_decision(log)
+                            except Exception as db_err:
+                                print(f"Error saving agent decision log: {db_err}", flush=True)
+                                
                     current_step += 1
                     render_live_progress(current_step, all_messages)
                     time.sleep(0.1)
@@ -474,12 +491,34 @@ if scan_clicked:
             else:
                 ranked = load_all_opportunities()
 
+            # 💾 Finalize and commit completed scan metadata
+            scan_meta.status = "completed"
+            scan_meta.completed_at = datetime.utcnow()
+            if final_state:
+                f_meta = final_state.get("scan_metadata")
+                if f_meta:
+                    scan_meta.total_found = getattr(f_meta, "total_found", len(ranked))
+                    scan_meta.sources_searched = getattr(f_meta, "sources_searched", [])
+                else:
+                    scan_meta.total_found = len(ranked)
+                scan_meta.total_unique = len(ranked)
+                scan_meta.total_duplicates_removed = final_state.get("duplicates_removed", 0)
+            else:
+                scan_meta.total_found = len(ranked)
+                scan_meta.total_unique = len(ranked)
+                
+            from core.memory import save_scan
+            try:
+                save_scan(scan_meta)
+            except Exception as e:
+                print(f"Error saving completed scan metadata: {e}", flush=True)
+
             st.session_state.opportunities = ranked
             st.session_state.scan_complete = True
             st.session_state.scan_stats = {
-                "total": initial_state.get("scan_metadata", scan_meta).total_found if hasattr(scan_meta, "total_found") else len(ranked),
-                "unique": len(ranked),
-                "duplicates": initial_state.get("duplicates_removed", 0),
+                "total": scan_meta.total_found,
+                "unique": scan_meta.total_unique,
+                "duplicates": scan_meta.total_duplicates_removed,
                 "sources": len(set(o.get("source", "") for o in ranked))
             }
 
@@ -488,6 +527,16 @@ if scan_clicked:
 
         except Exception as e:
             progress_container.empty()
+            # 💾 Save failed scan status and details
+            scan_meta.status = "failed"
+            scan_meta.completed_at = datetime.utcnow()
+            scan_meta.error = str(e)
+            from core.memory import save_scan
+            try:
+                save_scan(scan_meta)
+            except Exception as db_err:
+                print(f"Error saving failed scan metadata: {db_err}", flush=True)
+                
             st.error(f"⚠️ Agent pipeline error: {str(e)}")
             st.info("💡 Make sure your GOOGLE_API_KEY is set in the .env file")
             import traceback
