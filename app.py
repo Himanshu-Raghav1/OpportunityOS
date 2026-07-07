@@ -166,6 +166,15 @@ with st.sidebar:
             st.success("✅ PDF Resume uploaded")
         else:
             st.session_state.user_resume_bytes = None
+
+        st.markdown("")
+        # Trigger button for matching saved opportunities against personalization
+        match_clicked = st.button(
+            "🎯 Match Saved Opportunities",
+            type="primary",
+            use_container_width=True,
+            key="match_btn"
+        )
     else:
         st.session_state.user_resume = st.text_area(
             "Paste your skills, bio, or resume snippet here:",
@@ -207,6 +216,94 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+
+# ── Run Personalized Match Re-evaluation ──────────────────────────────────────
+if st.session_state.personalize_match and st.session_state.get("match_btn"):
+    from datetime import datetime
+    import json
+    
+    # Synthesize profile
+    with st.status("🧠 Synthesizing Personal Profile...", expanded=True) as status:
+        st.write("🔗 Fetching GitHub profile and repositories...")
+        st.write("📄 Extracting text from PDF resume...")
+        st.write("🤖 Running Gemini profiler...")
+        
+        from core.profile_extractor import synthesize_profile
+        profile = synthesize_profile(
+            github_user=st.session_state.user_github,
+            linkedin_text=st.session_state.user_linkedin,
+            resume_bytes=st.session_state.get("user_resume_bytes")
+        )
+        st.session_state.user_profile = profile
+        status.update(label="✅ User Profile Synthesized!", state="complete")
+        
+    st.info(f"**Extracted Skills:** {', '.join(profile.get('skills', []))}")
+    st.info(f"**Experience Level:** {profile.get('experience_level', 'Unknown')}")
+    
+    # Load all opportunities from memory
+    from core.memory import load_all_opportunities, save_opportunities_bulk
+    from core.models import Opportunity
+    from agents.agent_08_evaluator import run_evaluator
+    
+    with st.spinner("🎯 Evaluating opportunities against your profile..."):
+        opps_data = load_all_opportunities()
+        if opps_data:
+            opp_objs = []
+            for o in opps_data:
+                # Parse required_skills safely
+                skills = o.get("required_skills", "[]")
+                if isinstance(skills, str):
+                    try:
+                        skills = json.loads(skills)
+                    except Exception:
+                        skills = []
+                o_dict = dict(o)
+                o_dict["required_skills"] = skills
+                
+                # Parse datetimes safely
+                if o_dict.get("deadline_date") and isinstance(o_dict["deadline_date"], str):
+                    try:
+                        o_dict["deadline_date"] = datetime.fromisoformat(o_dict["deadline_date"])
+                    except Exception:
+                        o_dict["deadline_date"] = None
+                if o_dict.get("created_at") and isinstance(o_dict["created_at"], str):
+                    try:
+                        o_dict["created_at"] = datetime.fromisoformat(o_dict["created_at"])
+                    except Exception:
+                        o_dict["created_at"] = datetime.utcnow()
+                        
+                opp_objs.append(Opportunity(**o_dict))
+                
+            mock_state = {
+                "scan_id": opp_objs[0].scan_id if opp_objs else "personalized-match",
+                "user_preferences": {
+                    "resume": st.session_state.get("user_resume", ""),
+                    "profile": profile
+                },
+                "ranked_opportunities": opp_objs
+            }
+            
+            # Run the matchmaking evaluator
+            eval_result = run_evaluator(mock_state)
+            evaluated_opps = eval_result.get("ranked_opportunities", opp_objs)
+            
+            # Convert back to dicts
+            final_opps = []
+            for o in evaluated_opps:
+                final_opps.append(o.model_dump() if hasattr(o, "model_dump") else (o.dict() if hasattr(o, "dict") else o))
+                
+            st.session_state.opportunities = final_opps
+            st.session_state.scan_complete = True
+            st.session_state.scan_stats = {
+                "total": len(final_opps),
+                "unique": len(final_opps),
+                "duplicates": 0,
+                "sources": len(set(o.get("source", "") for o in final_opps))
+            }
+            st.balloons()
+            st.success(f"🎯 Matching complete! Evaluated **{len(final_opps)} opportunities** against your profile.")
+        else:
+            st.warning("⚠️ No opportunities found in database. Run a live scan first.")
 
 # ── Run Agent Pipeline ────────────────────────────────────────────────────────
 if scan_clicked:
